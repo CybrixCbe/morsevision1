@@ -1,0 +1,23 @@
+# Python/FastAPI environment
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+venv/
+ENV/
+
+# Configuration and Database
+.env
+database.sqlite
+*.db
+*.sqlite
+
+# User Intercepts & Avatars Uploads
+uploads/
+uploads/gallery/*.svg
+
+# Frontend package dependencies (if any)
+node_modules/
+.DS_Store
