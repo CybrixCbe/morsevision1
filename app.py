@@ -7,14 +7,17 @@ from jose import jwt
 from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse, RedirectResponse
 from pydantic import BaseModel, EmailStr
-from typing import Optional, List
+from typing import Optional, List, Union
 import uuid
 import re
 from jose import JWTError
 from dotenv import load_dotenv
 import shutil
+import urllib.request
+import urllib.parse
+import json
 
 load_dotenv()
 
@@ -124,9 +127,17 @@ def init_db():
     )
     """)
     
-    # 3. SCAN_HISTORY Table
+    # Check if old SCAN_HISTORY exists and rename to DECODE_HISTORY
+    try:
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='SCAN_HISTORY'")
+        if cursor.fetchone():
+            cursor.execute("ALTER TABLE SCAN_HISTORY RENAME TO DECODE_HISTORY")
+    except Exception:
+        pass
+
+    # 3. DECODE_HISTORY Table
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS SCAN_HISTORY (
+    CREATE TABLE IF NOT EXISTS DECODE_HISTORY (
         id TEXT PRIMARY KEY,
         user_id TEXT,
         filename TEXT,
@@ -172,23 +183,34 @@ def init_db():
         id TEXT PRIMARY KEY,
         user_id TEXT,
         activity_type TEXT,
-        scan_type TEXT,
+        decode_type TEXT,
         created_at TEXT
     )
     """)
+    try:
+        cursor.execute("ALTER TABLE USER_ACTIVITY RENAME COLUMN scan_type TO decode_type")
+    except Exception:
+        pass
     try:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_created ON USER_ACTIVITY(created_at)")
     except Exception:
         pass
 
     # 7. ANALYTICS_SUMMARY Table
+    # Drop old table if it has total_scans column to recreate it cleanly
+    try:
+        cursor.execute("SELECT total_scans FROM ANALYTICS_SUMMARY LIMIT 1")
+        cursor.execute("DROP TABLE ANALYTICS_SUMMARY")
+    except Exception:
+        pass
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS ANALYTICS_SUMMARY (
         id TEXT PRIMARY KEY,
-        total_scans INTEGER DEFAULT 0,
+        total_decodes INTEGER DEFAULT 0,
         total_users INTEGER DEFAULT 0,
-        successful_scans INTEGER DEFAULT 0,
-        failed_scans INTEGER DEFAULT 0,
+        successful_decodes INTEGER DEFAULT 0,
+        failed_decodes INTEGER DEFAULT 0,
         reports_downloaded INTEGER DEFAULT 0,
         updated_at TEXT
     )
@@ -217,29 +239,29 @@ def log_event(level, text):
     db_run("DELETE FROM SYSTEM_LOGS WHERE id NOT IN (SELECT id FROM SYSTEM_LOGS ORDER BY time DESC LIMIT 100)")
     print(f"[SYS-{level}]: {text}")
 
-def log_activity(user_id, activity_type, scan_type=None):
+def log_activity(user_id, activity_type, decode_type=None):
     activity_id = f"act-{uuid.uuid4()}"
     now = datetime.datetime.utcnow().isoformat()
     db_run(
-        "INSERT INTO USER_ACTIVITY (id, user_id, activity_type, scan_type, created_at) VALUES (?, ?, ?, ?, ?)",
-        [activity_id, user_id, activity_type, scan_type, now]
+        "INSERT INTO USER_ACTIVITY (id, user_id, activity_type, decode_type, created_at) VALUES (?, ?, ?, ?, ?)",
+        [activity_id, user_id, activity_type, decode_type, now]
     )
     
     # Update analytics summary
     summary = db_get("SELECT * FROM ANALYTICS_SUMMARY WHERE id = 'main'")
     if not summary:
-        db_run("INSERT INTO ANALYTICS_SUMMARY (id, total_scans, total_users, successful_scans, failed_scans, reports_downloaded, updated_at) VALUES ('main', 0, 0, 0, 0, 0, ?)", [now])
-        summary = {"total_scans": 0, "total_users": 0, "successful_scans": 0, "failed_scans": 0, "reports_downloaded": 0}
+        db_run("INSERT INTO ANALYTICS_SUMMARY (id, total_decodes, total_users, successful_decodes, failed_decodes, reports_downloaded, updated_at) VALUES ('main', 0, 0, 0, 0, 0, ?)", [now])
+        summary = {"total_decodes": 0, "total_users": 0, "successful_decodes": 0, "failed_decodes": 0, "reports_downloaded": 0}
         
     total_users = db_get("SELECT COUNT(*) as c FROM USERS")["c"]
-    total_scans = db_get("SELECT COUNT(*) as c FROM USER_ACTIVITY WHERE activity_type = 'scan_execution'")["c"]
-    successful_scans = db_get("SELECT COUNT(*) as c FROM USER_ACTIVITY WHERE activity_type = 'scan_execution' AND scan_type != 'Failed Scan'")["c"]
-    failed_scans = db_get("SELECT COUNT(*) as c FROM USER_ACTIVITY WHERE activity_type = 'scan_execution' AND scan_type = 'Failed Scan'")["c"]
+    total_decodes = db_get("SELECT COUNT(*) as c FROM USER_ACTIVITY WHERE activity_type = 'decode_execution'")["c"]
+    successful_decodes = db_get("SELECT COUNT(*) as c FROM USER_ACTIVITY WHERE activity_type = 'decode_execution' AND decode_type != 'Failed Decode'")["c"]
+    failed_decodes = db_get("SELECT COUNT(*) as c FROM USER_ACTIVITY WHERE activity_type = 'decode_execution' AND decode_type = 'Failed Decode'")["c"]
     reports_downloaded = db_get("SELECT COUNT(*) as c FROM USER_ACTIVITY WHERE activity_type = 'report_download'")["c"]
     
     db_run(
-        "UPDATE ANALYTICS_SUMMARY SET total_scans = ?, total_users = ?, successful_scans = ?, failed_scans = ?, reports_downloaded = ?, updated_at = ? WHERE id = 'main'",
-        [total_scans, total_users, successful_scans, failed_scans, reports_downloaded, now]
+        "UPDATE ANALYTICS_SUMMARY SET total_decodes = ?, total_users = ?, successful_decodes = ?, failed_decodes = ?, reports_downloaded = ?, updated_at = ? WHERE id = 'main'",
+        [total_decodes, total_users, successful_decodes, failed_decodes, reports_downloaded, now]
     )
 
 # JWT Utility Configuration
@@ -330,7 +352,7 @@ class LoginSchema(BaseModel):
 class CompleteProfileSchema(BaseModel):
     organization: Optional[str] = None
     department: Optional[str] = None
-    purpose: Optional[str] = None
+    purpose: Optional[Union[List[str], str]] = None
     experience_level: Optional[str] = None
     country: Optional[str] = None
     timezone: Optional[str] = None
@@ -409,12 +431,8 @@ def register(data: RegisterSchema, background_tasks: BackgroundTasks):
     
     # Password verification
     pwd = data.password
-    has_upper = any(c.isupper() for c in pwd)
-    has_lower = any(c.islower() for c in pwd)
-    has_digit = any(c.isdigit() for c in pwd)
-    has_special = any(not c.isalnum() for c in pwd)
-    if len(pwd) < 8 or not (has_upper and has_lower and has_digit and has_special):
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters and include uppercase, lowercase, number, and special character.")
+    if len(pwd) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long.")
     
     # Generate OTP
     otp = str(secrets.randbelow(900000) + 100000)
@@ -700,6 +718,233 @@ def login(data: LoginSchema):
         }
     }
 
+@app.get("/api/auth/config")
+def get_auth_config():
+    google_client_id = os.getenv("GOOGLE_CLIENT_ID")
+    google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    github_client_id = os.getenv("GITHUB_CLIENT_ID")
+    github_client_secret = os.getenv("GITHUB_CLIENT_SECRET")
+    
+    return {
+        "googleConfigured": bool(google_client_id and google_client_id.strip() and google_client_secret and google_client_secret.strip()),
+        "githubConfigured": bool(github_client_id and github_client_id.strip() and github_client_secret and github_client_secret.strip())
+    }
+
+@app.get("/api/auth/google")
+def google_login():
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    redirect_uri = os.getenv("GOOGLE_CALLBACK_URL")
+    if not client_id or not redirect_uri:
+        raise HTTPException(status_code=400, detail="Google OAuth is not configured on this server.")
+    
+    auth_url = (
+        "https://accounts.google.com/o/oauth2/v2/auth?"
+        f"response_type=code"
+        f"&client_id={client_id}"
+        f"&redirect_uri={redirect_uri}"
+        f"&scope=openid%20profile%20email"
+        f"&prompt=select_account"
+    )
+    return RedirectResponse(auth_url)
+
+@app.get("/api/auth/google/callback")
+def google_callback(code: str = None, error: str = None):
+    if error:
+        return RedirectResponse(f"/?oauth_error={urllib.parse.quote(error)}")
+    if not code:
+        return RedirectResponse("/?oauth_error=No%20authorization%20code%20provided")
+        
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    redirect_uri = os.getenv("GOOGLE_CALLBACK_URL")
+    
+    token_url = "https://oauth2.googleapis.com/token"
+    data = urllib.parse.urlencode({
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code"
+    }).encode("utf-8")
+    
+    try:
+        req = urllib.request.Request(token_url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        with urllib.request.urlopen(req) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            access_token = res_data.get("access_token")
+            
+        userinfo_url = "https://www.googleapis.com/oauth2/v3/userinfo"
+        req_info = urllib.request.Request(userinfo_url, headers={"Authorization": f"Bearer {access_token}"})
+        with urllib.request.urlopen(req_info) as response_info:
+            profile = json.loads(response_info.read().decode("utf-8"))
+            
+        email = profile.get("email")
+        name = profile.get("name") or email.split("@")[0]
+        provider_id = profile.get("sub")
+        avatar = profile.get("picture")
+        
+        if not email:
+            return RedirectResponse("/?oauth_error=No%20email%20returned%20from%20Google")
+            
+        email_lower = email.lower().strip()
+        user = db_get("SELECT * FROM USERS WHERE email = ?", [email_lower])
+        
+        if user:
+            if user["account_status"] == 'suspended':
+                 return RedirectResponse("/?oauth_error=Access%20denied.%20Account%20suspended.")
+            db_run("UPDATE USERS SET last_login = ? WHERE id = ?", [datetime.datetime.utcnow().isoformat(), user["id"]])
+        else:
+            user_id = f"usr-{uuid.uuid4()}"
+            db_run(
+                "INSERT INTO USERS (id, name, email, is_verified, created_at, last_login, role, provider, provider_id, avatar) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [user_id, name, email_lower, 1, datetime.datetime.utcnow().isoformat(), datetime.datetime.utcnow().isoformat(), "User", "google", provider_id, avatar]
+            )
+            user = db_get("SELECT * FROM USERS WHERE id = ?", [user_id])
+            log_event("INFO", f"Google operator auto-registered: {email_lower}")
+            
+        token_payload = {
+            "id": user["id"],
+            "name": user["name"],
+            "email": user["email"],
+            "role": user["role"],
+            "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+        }
+        token = jwt.encode(token_payload, SECRET_KEY, algorithm="HS256")
+        log_event("INFO", f"Google OAuth authentication successful for {email_lower}")
+        
+        profile_completed = 1 if user.get("profile_completed") else 0
+        return RedirectResponse(
+            f"/?token={token}"
+            f"&email={urllib.parse.quote(user['email'])}"
+            f"&name={urllib.parse.quote(user['name'])}"
+            f"&role={urllib.parse.quote(user['role'])}"
+            f"&profile_completed={profile_completed}"
+        )
+    except Exception as e:
+        log_event("ERROR", f"Google OAuth callback error: {str(e)}")
+        return RedirectResponse(f"/?oauth_error={urllib.parse.quote(str(e))}")
+
+@app.get("/api/auth/github")
+def github_login():
+    client_id = os.getenv("GITHUB_CLIENT_ID")
+    redirect_uri = os.getenv("GITHUB_CALLBACK_URL")
+    if not client_id or not redirect_uri:
+        raise HTTPException(status_code=400, detail="GitHub OAuth is not configured on this server.")
+    
+    auth_url = (
+        "https://github.com/login/oauth/authorize?"
+        f"client_id={client_id}"
+        f"&redirect_uri={redirect_uri}"
+        f"&scope=user:email"
+    )
+    return RedirectResponse(auth_url)
+
+@app.get("/api/auth/github/callback")
+def github_callback(code: str = None, error: str = None, error_description: str = None):
+    if error:
+        err_msg = error_description or error
+        return RedirectResponse(f"/?oauth_error={urllib.parse.quote(err_msg)}")
+    if not code:
+        return RedirectResponse("/?oauth_error=No%20authorization%20code%20provided")
+        
+    client_id = os.getenv("GITHUB_CLIENT_ID")
+    client_secret = os.getenv("GITHUB_CLIENT_SECRET")
+    redirect_uri = os.getenv("GITHUB_CALLBACK_URL")
+    
+    token_url = "https://github.com/login/oauth/access_token"
+    data = urllib.parse.urlencode({
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri
+    }).encode("utf-8")
+    
+    try:
+        req = urllib.request.Request(
+            token_url, 
+            data=data, 
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+        )
+        with urllib.request.urlopen(req) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            access_token = res_data.get("access_token")
+            
+        if not access_token:
+            err_msg = res_data.get("error_description") or res_data.get("error") or "Failed to retrieve access token"
+            return RedirectResponse(f"/?oauth_error={urllib.parse.quote(err_msg)}")
+            
+        user_url = "https://api.github.com/user"
+        req_user = urllib.request.Request(
+            user_url, 
+            headers={"Authorization": f"token {access_token}", "User-Agent": "MorseVision-App"}
+        )
+        with urllib.request.urlopen(req_user) as response_user:
+            profile = json.loads(response_user.read().decode("utf-8"))
+            
+        emails_url = "https://api.github.com/user/emails"
+        req_emails = urllib.request.Request(
+            emails_url, 
+            headers={"Authorization": f"token {access_token}", "User-Agent": "MorseVision-App"}
+        )
+        with urllib.request.urlopen(req_emails) as response_emails:
+            emails_list = json.loads(response_emails.read().decode("utf-8"))
+            
+        email = None
+        for email_item in emails_list:
+            if email_item.get("primary"):
+                email = email_item.get("email")
+                break
+        if not email and emails_list:
+            email = emails_list[0].get("email")
+            
+        if not email:
+            email = profile.get("email")
+            
+        if not email:
+            email = f"{profile.get('login')}@github.user"
+            
+        name = profile.get("name") or profile.get("login") or email.split("@")[0]
+        provider_id = str(profile.get("id"))
+        avatar = profile.get("avatar_url")
+        
+        email_lower = email.lower().strip()
+        user = db_get("SELECT * FROM USERS WHERE email = ?", [email_lower])
+        
+        if user:
+            if user["account_status"] == 'suspended':
+                 return RedirectResponse("/?oauth_error=Access%20denied.%20Account%20suspended.")
+            db_run("UPDATE USERS SET last_login = ? WHERE id = ?", [datetime.datetime.utcnow().isoformat(), user["id"]])
+        else:
+            user_id = f"usr-{uuid.uuid4()}"
+            db_run(
+                "INSERT INTO USERS (id, name, email, is_verified, created_at, last_login, role, provider, provider_id, avatar) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [user_id, name, email_lower, 1, datetime.datetime.utcnow().isoformat(), datetime.datetime.utcnow().isoformat(), "User", "github", provider_id, avatar]
+            )
+            user = db_get("SELECT * FROM USERS WHERE id = ?", [user_id])
+            log_event("INFO", f"GitHub operator auto-registered: {email_lower}")
+            
+        token_payload = {
+            "id": user["id"],
+            "name": user["name"],
+            "email": user["email"],
+            "role": user["role"],
+            "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+        }
+        token = jwt.encode(token_payload, SECRET_KEY, algorithm="HS256")
+        log_event("INFO", f"GitHub OAuth authentication successful for {email_lower}")
+        
+        profile_completed = 1 if user.get("profile_completed") else 0
+        return RedirectResponse(
+            f"/?token={token}"
+            f"&email={urllib.parse.quote(user['email'])}"
+            f"&name={urllib.parse.quote(user['name'])}"
+            f"&role={urllib.parse.quote(user['role'])}"
+            f"&profile_completed={profile_completed}"
+        )
+    except Exception as e:
+        log_event("ERROR", f"GitHub OAuth callback error: {str(e)}")
+        return RedirectResponse(f"/?oauth_error={urllib.parse.quote(str(e))}")
+
 @app.post("/api/auth/google")
 def google_auth(payload: dict):
     email = payload.get("email")
@@ -821,10 +1066,11 @@ def reset_password(data: ResetPasswordSchema):
 
 @app.post("/api/user/complete-profile")
 def complete_profile(data: CompleteProfileSchema, user: dict = Depends(get_current_user)):
+    purpose_val = ", ".join(data.purpose) if isinstance(data.purpose, list) else data.purpose
     prefs_str = str(data.notification_prefs) if data.notification_prefs else "{}"
     db_run(
         "UPDATE USERS SET organization = ?, department = ?, purpose = ?, experience_level = ?, country = ?, timezone = ?, preferred_theme = ?, notification_prefs = ?, profile_completed = 1 WHERE id = ?",
-        [data.organization, data.department, data.purpose, data.experience_level, data.country, data.timezone, data.preferred_theme, prefs_str, user.get("id")]
+        [data.organization, data.department, purpose_val, data.experience_level, data.country, data.timezone, data.preferred_theme, prefs_str, user.get("id")]
     )
     updated_user = db_get("SELECT * FROM USERS WHERE id = ?", [user.get("id")])
     log_event("INFO", f"Onboarding profile setup completed for {user.get('email')}")
@@ -958,21 +1204,22 @@ def select_avatar(data: SetAvatarSchema, user: dict = Depends(get_current_user))
 def save_history(data: HistorySchema, user: dict = Depends(get_current_user)):
     history_id = f"hist-{uuid.uuid4()}"
     db_run(
-        "INSERT INTO SCAN_HISTORY (id, user_id, filename, decoder_type, decoded_morse, decoded_text, confidence, processing_time, wpm, carrier_freq, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO DECODE_HISTORY (id, user_id, filename, decoder_type, decoded_morse, decoded_text, confidence, processing_time, wpm, carrier_freq, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [history_id, user.get("id"), data.name, data.type, data.morse, data.text, "100%", "0.05s", data.wpm, data.carrierFreq or "800 Hz", data.timestamp]
     )
-    log_activity(user.get("id"), 'scan_execution', scan_type='Morse Decode')
+    s_type = 'Manual Translate' if data.type == 'Manual Decoded' else 'Morse Decode'
+    log_activity(user.get("id"), 'decode_execution', decode_type=s_type)
     log_event("INFO", f"Committed manual decode log to history timeline.")
     return {"message": "Log committed successfully.", "id": history_id}
 
 @app.get("/api/user/history")
 def get_history(user: dict = Depends(get_current_user)):
-    rows = db_all("SELECT * FROM SCAN_HISTORY WHERE user_id = ? ORDER BY created_at DESC", [user.get("id")])
+    rows = db_all("SELECT * FROM DECODE_HISTORY WHERE user_id = ? ORDER BY created_at DESC", [user.get("id")])
     return rows
 
 @app.get("/api/downloads")
 def get_downloads(user: dict = Depends(get_current_user)):
-    rows = db_all("SELECT * FROM SCAN_HISTORY WHERE user_id = ? AND filename != 'Manual Translation Intercept' ORDER BY created_at DESC", [user.get("id")])
+    rows = db_all("SELECT * FROM DECODE_HISTORY WHERE user_id = ? AND filename != 'Manual Translation Intercept' ORDER BY created_at DESC", [user.get("id")])
     return rows
 
 @app.post("/api/upload")
@@ -984,6 +1231,7 @@ def upload_file(file: UploadFile = File(...), user: dict = Depends(get_current_u
         shutil.copyfileobj(file.file, f)
     size = os.path.getsize(target_path)
     log_event("INFO", f"File intercept uploaded: {file.filename} ({(size/1024):.1f} KB)")
+    log_activity(user.get("id"), 'decode_execution', decode_type='File Ingest')
     return {
         "message": "Upload successful.",
         "name": file.filename,
@@ -1019,7 +1267,7 @@ def admin_login(data: LoginSchema):
 @app.get("/api/admin/stats")
 def get_admin_stats(admin: dict = Depends(get_current_admin)):
     ops = db_get("SELECT COUNT(*) as count FROM USERS")["count"]
-    decodes = db_get("SELECT COUNT(*) as count FROM SCAN_HISTORY")["count"]
+    decodes = db_get("SELECT COUNT(*) as count FROM DECODE_HISTORY")["count"]
     return {
         "activeOperators": ops,
         "decodeCount": decodes,
@@ -1030,9 +1278,9 @@ def get_admin_stats(admin: dict = Depends(get_current_admin)):
 @app.get("/api/admin/users")
 def get_admin_users(admin: dict = Depends(get_current_admin)):
     rows = db_all("SELECT id, name, email, created_at, last_login, account_status, failed_attempts, role FROM USERS ORDER BY created_at DESC")
-    # For each user, fetch their count of scan decodes
+    # For each user, fetch their count of signal decodes
     for r in rows:
-        decodes_count = db_get("SELECT COUNT(*) as count FROM SCAN_HISTORY WHERE user_id = ?", [r["id"]])["count"]
+        decodes_count = db_get("SELECT COUNT(*) as count FROM DECODE_HISTORY WHERE user_id = ?", [r["id"]])["count"]
         r["total_decodes"] = decodes_count
     return rows
 
@@ -1072,7 +1320,7 @@ def admin_lock_user(data: AdminUserLockSchema, admin: dict = Depends(get_current
 @app.delete("/api/admin/users")
 def admin_delete_user(data: AdminUserDeleteSchema, admin: dict = Depends(get_current_admin)):
     db_run("DELETE FROM USERS WHERE id = ?", [data.id])
-    db_run("DELETE FROM SCAN_HISTORY WHERE user_id = ?", [data.id])
+    db_run("DELETE FROM DECODE_HISTORY WHERE user_id = ?", [data.id])
     log_event("INFO", f"Operator removed from registry: ID {data.id}")
     return {"message": "Operator removed from registry."}
 
@@ -1105,10 +1353,10 @@ def admin_export_users(admin: dict = Depends(get_current_admin)):
 @app.get("/api/admin/history")
 def get_admin_history(admin: dict = Depends(get_current_admin)):
     rows = db_all("""
-        SELECT SCAN_HISTORY.*, USERS.name as operator_name, USERS.email as operator_email 
-        FROM SCAN_HISTORY 
-        LEFT JOIN USERS ON SCAN_HISTORY.user_id = USERS.id 
-        ORDER BY SCAN_HISTORY.created_at DESC
+        SELECT DECODE_HISTORY.*, USERS.name as operator_name, USERS.email as operator_email 
+        FROM DECODE_HISTORY 
+        LEFT JOIN USERS ON DECODE_HISTORY.user_id = USERS.id 
+        ORDER BY DECODE_HISTORY.created_at DESC
     """)
     return rows
 
@@ -1123,30 +1371,30 @@ def delete_history_item(data: DeleteHistorySchema, user: dict = Depends(get_curr
 
     if is_admin:
         rows = db_all("""
-            SELECT SCAN_HISTORY.id 
-            FROM SCAN_HISTORY 
-            LEFT JOIN USERS ON SCAN_HISTORY.user_id = USERS.id 
-            ORDER BY SCAN_HISTORY.created_at DESC
+            SELECT DECODE_HISTORY.id 
+            FROM DECODE_HISTORY 
+            LEFT JOIN USERS ON DECODE_HISTORY.user_id = USERS.id 
+            ORDER BY DECODE_HISTORY.created_at DESC
         """)
     else:
-        rows = db_all("SELECT id FROM SCAN_HISTORY WHERE user_id = ? ORDER BY created_at DESC", [user.get("id")])
+        rows = db_all("SELECT id FROM DECODE_HISTORY WHERE user_id = ? ORDER BY created_at DESC", [user.get("id")])
 
     if data.index < 0 or data.index >= len(rows):
          raise HTTPException(status_code=400, detail="Invalid index.")
     
     target_id = rows[data.index]["id"]
-    db_run("DELETE FROM SCAN_HISTORY WHERE id = ?", [target_id])
-    log_event("INFO", f"Deleted scan history entry ID: {target_id}")
+    db_run("DELETE FROM DECODE_HISTORY WHERE id = ?", [target_id])
+    log_event("INFO", f"Deleted decode history entry ID: {target_id}")
     return {"message": "Log purged successfully."}
 
 @app.get("/api/admin/files")
 def get_admin_files(admin: dict = Depends(get_current_admin)):
     rows = db_all("""
-        SELECT SCAN_HISTORY.*, USERS.name as operator_name, USERS.email as operator_email 
-        FROM SCAN_HISTORY 
-        LEFT JOIN USERS ON SCAN_HISTORY.user_id = USERS.id 
-        WHERE SCAN_HISTORY.filename != 'Manual Translation Intercept' 
-        ORDER BY SCAN_HISTORY.created_at DESC
+        SELECT DECODE_HISTORY.*, USERS.name as operator_name, USERS.email as operator_email 
+        FROM DECODE_HISTORY 
+        LEFT JOIN USERS ON DECODE_HISTORY.user_id = USERS.id 
+        WHERE DECODE_HISTORY.filename != 'Manual Translation Intercept' 
+        ORDER BY DECODE_HISTORY.created_at DESC
     """)
     return rows
 
@@ -1157,9 +1405,9 @@ def get_admin_logs(admin: dict = Depends(get_current_admin)):
 
 @app.post("/api/user/activity")
 def create_user_activity(body: dict, user: dict = Depends(get_current_user)):
-    activity_type = body.get("activity_type", "scan_execution")
-    scan_type = body.get("scan_type", "Version Scan")
-    log_activity(user.get("id"), activity_type, scan_type=scan_type)
+    activity_type = body.get("activity_type", "decode_execution")
+    decode_type = body.get("decode_type", "Morse Decode")
+    log_activity(user.get("id"), activity_type, decode_type=decode_type)
     return {"message": "Activity logged successfully."}
 
 @app.get("/api/admin/analytics")
@@ -1167,8 +1415,8 @@ def get_admin_analytics(admin: dict = Depends(get_current_admin)):
     summary = db_get("SELECT * FROM ANALYTICS_SUMMARY WHERE id = 'main'")
     if not summary:
         now = datetime.datetime.utcnow().isoformat()
-        db_run("INSERT INTO ANALYTICS_SUMMARY (id, total_scans, total_users, successful_scans, failed_scans, reports_downloaded, updated_at) VALUES ('main', 0, 0, 0, 0, 0, ?)", [now])
-        summary = {"total_scans": 0, "total_users": 0, "successful_scans": 0, "failed_scans": 0, "reports_downloaded": 0}
+        db_run("INSERT INTO ANALYTICS_SUMMARY (id, total_decodes, total_users, successful_decodes, failed_decodes, reports_downloaded, updated_at) VALUES ('main', 0, 0, 0, 0, 0, ?)", [now])
+        summary = {"total_decodes": 0, "total_users": 0, "successful_decodes": 0, "failed_decodes": 0, "reports_downloaded": 0}
         
     # Get last 7 days activities dynamically
     growth_data = []
@@ -1186,14 +1434,20 @@ def get_admin_analytics(admin: dict = Depends(get_current_admin)):
         )["count"]
         growth_data.append(count)
         
-    # Get counts of all security scan types
-    scan_types = ["Version Scan", "Ping Scan", "Aggressive Scan", "WHOIS Lookup", "DNS Lookup", "Clickjacking Test", "Morse Decode"]
+    # Get counts of all MorseVision activity types
+    decode_types = ["Morse Decode", "File Ingest", "Manual Translate", "Report Download"]
     types_count = []
-    for st in scan_types:
-        count = db_get(
-            "SELECT COUNT(*) as count FROM USER_ACTIVITY WHERE activity_type = 'scan_execution' AND scan_type = ?",
-            [st]
-        )["count"]
+    for dt in decode_types:
+        if dt == "Report Download":
+            count = db_get(
+                "SELECT COUNT(*) as count FROM USER_ACTIVITY WHERE activity_type = 'report_download'",
+                []
+            )["count"]
+        else:
+            count = db_get(
+                "SELECT COUNT(*) as count FROM USER_ACTIVITY WHERE activity_type = 'decode_execution' AND decode_type = ?",
+                [dt]
+            )["count"]
         types_count.append(count)
         
     return {
@@ -1203,7 +1457,7 @@ def get_admin_analytics(admin: dict = Depends(get_current_admin)):
             "data": growth_data
         },
         "types": {
-            "labels": scan_types,
+            "labels": decode_types,
             "data": types_count
         }
     }
@@ -1219,13 +1473,47 @@ def update_admin_settings(settings: AdminSettingsSchema, admin: dict = Depends(g
     log_event("INFO", f"Administrator updated kernel system settings: {settings}")
     return {"message": "Settings saved successfully."}
 
-@app.post("/api/admin/backup")
+@app.get("/api/admin/backup")
 def trigger_backup(admin: dict = Depends(get_current_admin)):
-    backup_file = f"backup_{int(datetime.datetime.utcnow().timestamp())}.db"
-    dest = os.path.join(os.path.dirname(__file__), backup_file)
-    shutil.copyfile(db_path, dest)
-    log_event("INFO", f"Automated database backup triggered successfully: {backup_file}")
-    return {"message": "Database backup created successfully.", "filename": backup_file}
+    tables = ["USERS", "OTP", "DECODE_HISTORY", "ADMIN", "SYSTEM_LOGS", "USER_ACTIVITY", "ANALYTICS_SUMMARY"]
+    data = {}
+    for table in tables:
+        data[table] = db_all(f"SELECT * FROM {table}")
+    log_event("INFO", "Database JSON backup generated successfully.")
+    return data
+
+@app.post("/api/admin/restore")
+def restore_backup(data: dict, admin: dict = Depends(get_current_admin)):
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        tables = ["USERS", "OTP", "DECODE_HISTORY", "ADMIN", "SYSTEM_LOGS", "USER_ACTIVITY", "ANALYTICS_SUMMARY"]
+        for table in tables:
+            cursor.execute(f"DELETE FROM {table}")
+            
+        for table in tables:
+            rows = data.get(table, [])
+            if not rows:
+                continue
+            # Get columns from the first row to construct insert statement dynamically
+            columns = rows[0].keys()
+            col_list = ", ".join(columns)
+            placeholders = ", ".join(["?"] * len(columns))
+            sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
+            
+            for row in rows:
+                values = [row[col] for col in columns]
+                cursor.execute(sql, values)
+                
+        conn.commit()
+        log_event("INFO", "System databases restored successfully from JSON backup.")
+        return {"message": "Restore successful"}
+    except Exception as e:
+        conn.rollback()
+        log_event("ERROR", f"Restore database failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Restore failed: {str(e)}")
+    finally:
+        conn.close()
 
 # Static file serving config
 app.mount("/css", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "css")), name="css")

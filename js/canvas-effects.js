@@ -331,8 +331,8 @@ const CanvasCharts = {
     const chartW = width - paddingLeft - paddingRight;
     const chartH = height - paddingTop - paddingBottom;
 
-    const totalScans = values.reduce((a, b) => a + b, 0);
-    if (totalScans === 0) {
+    const totalDecodes = values.reduce((a, b) => a + b, 0);
+    if (totalDecodes === 0) {
       ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
       ctx.font = '12px Sora, sans-serif';
       ctx.textAlign = 'center';

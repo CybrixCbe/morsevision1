@@ -624,7 +624,7 @@ const Components = {
     let navItems = [
       { id: 'dashboard', label: 'Decode', icon: Icons.dashboard },
       { id: 'translator', label: 'Translator Hub', icon: Icons.translator },
-      { id: 'history', label: 'Scan History', icon: Icons.history },
+      { id: 'history', label: 'Signal Logs', icon: Icons.history },
       { id: 'downloads', label: 'Downloads', icon: Icons.downloads },
       { id: 'profile', label: 'Profile', icon: Icons.profile },
       { id: 'settings', label: 'Settings', icon: Icons.settings }
@@ -1218,11 +1218,8 @@ const Components = {
   // STEP 1: PREMIUM UPLOAD CARD
   // ----------------------------------------------------
   Step1Upload(state) {
-    const tab = state.dashboardTab || 'media';
-
-    let contentMarkup = '';
-    if (tab === 'media') {
-      contentMarkup = `
+    return `
+      <div class="glass-panel animate-slide-up" style="max-width: 680px; margin: 0 auto; padding: 40px; text-align: center; border-radius:24px; border-color:var(--border-glass-hover);" id="drag-drop-zone">
         <div class="upload-container-outer" id="upload-clickable-trigger" style="cursor:pointer; margin-bottom:20px;">
           <div class="concentric-ring ring-1"></div>
           <div class="concentric-ring ring-2"></div>
@@ -1254,56 +1251,6 @@ const Components = {
           <span style="padding:4px 10px; background:var(--bg-glass-input); border:1px solid var(--border-glass); border-radius:8px;">MOV</span>
           <span style="padding:4px 10px; background:var(--bg-glass-input); border:1px solid var(--border-glass); border-radius:8px;">MKV</span>
           <span style="padding:4px 10px; background:rgba(255,138,0,0.1); border:1px solid rgba(255,138,0,0.25); color:var(--accent-orange-bright); border-radius:8px;">MAX 100 MB</span>
-        </div>
-      `;
-    } else {
-      contentMarkup = `
-        <div style="display: flex; flex-direction: column; align-items: center; gap: 20px; max-width: 460px; margin: 0 auto;">
-          <div class="upload-circle-center" style="margin-bottom: 8px;">
-            ${Icons.security}
-          </div>
-          
-          <h2 style="font-size: 1.5rem; margin-bottom: 0px; font-weight: 800; letter-spacing: -0.02em; color:var(--text-primary);">
-            Cyber Security <span style="color:var(--accent-orange-bright);">Audits</span>
-          </h2>
-          <p style="color:var(--text-secondary); font-size:0.88rem; line-height:1.5; margin:0 0 10px 0;">
-            Run automated telemetry sweeps and security validation audits on system components.
-          </p>
-
-          <div style="width: 100%; text-align: left;" class="input-group">
-            <label class="input-label" style="font-size:0.82rem; font-weight:600; color:var(--text-secondary); margin-bottom:8px; display:block;">Select Scan Type</label>
-            <select id="select-security-scan-type" class="input-field" style="width: 100%; padding: 12px 16px; background: var(--bg-glass-input); border: 1px solid var(--border-glass); border-radius: 12px; color: var(--text-primary); font-size: 0.88rem; font-weight: 600; outline: none;">
-              <option value="Version Scan">Version Scan</option>
-              <option value="Ping Scan">Ping Scan</option>
-              <option value="Aggressive Scan">Aggressive Scan</option>
-              <option value="WHOIS Lookup">WHOIS Lookup</option>
-              <option value="DNS Lookup">DNS Lookup</option>
-              <option value="Clickjacking Test">Clickjacking Test</option>
-            </select>
-          </div>
-
-          <button id="btn-run-security-sweep" class="btn btn-primary" style="width: 100%; padding: 12px 28px; font-weight: 700; font-size: 0.88rem; border-radius: 12px; margin-top: 10px; cursor: pointer;">
-            Run Security Sweep
-          </button>
-        </div>
-      `;
-    }
-
-    return `
-      <div class="glass-panel animate-slide-up" style="max-width: 680px; margin: 0 auto; padding: 40px; text-align: center; border-radius:24px; border-color:var(--border-glass-hover);" id="drag-drop-zone">
-        
-        <!-- Segmented Navigation Tab -->
-        <div style="display:inline-flex; background:rgba(0,0,0,0.3); border:1px solid var(--border-glass); border-radius:14px; padding:4px; margin-bottom:32px;">
-          <button class="btn dashboard-seg-tab ${tab === 'media' ? 'btn-primary' : ''}" data-tab="media" style="padding:8px 20px; font-size:0.8rem; border-radius:10px; font-weight:700; border:none; background:${tab === 'media' ? 'var(--accent-gradient)' : 'transparent'}; color:${tab === 'media' ? '#fff' : 'var(--text-secondary)'}; cursor:pointer;">
-            Signal Intercept Ingest
-          </button>
-          <button class="btn dashboard-seg-tab ${tab === 'security' ? 'btn-primary' : ''}" data-tab="security" style="padding:8px 20px; font-size:0.8rem; border-radius:10px; font-weight:700; border:none; background:${tab === 'security' ? 'var(--accent-gradient)' : 'transparent'}; color:${tab === 'security' ? '#fff' : 'var(--text-secondary)'}; cursor:pointer;">
-            Cyber Security Audits
-          </button>
-        </div>
-
-        <div id="dashboard-tab-content-mount">
-          ${contentMarkup}
         </div>
       </div>
     `;
@@ -1615,7 +1562,7 @@ const Components = {
           </div>
           
           <button class="btn btn-primary" id="btn-reset-decode">
-            Scan Again
+            Decode Another
           </button>
         </div>
       </div>
@@ -1752,7 +1699,7 @@ const Components = {
   },
 
   // ----------------------------------------------------
-  // scan history view (API timelines logs)
+  // signal history view (API timelines logs)
   // ----------------------------------------------------
   History(state) {
     const list = state.decryptionHistory || [];
@@ -1927,7 +1874,7 @@ const Components = {
           <div style="display:flex; flex-direction:column; gap:24px;">
             <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:16px;">
               <div class="glass-panel" style="padding:20px; text-align:center; border-radius:14px;">
-                <p style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); margin-bottom:6px; font-weight:700;">Telemetry Scans</p>
+                <p style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); margin-bottom:6px; font-weight:700;">Telemetry Decodes</p>
                 <h3 style="font-size:1.6rem; font-weight:800;">${state.decryptionHistory.length}</h3>
               </div>
               <div class="glass-panel" style="padding:20px; text-align:center; border-radius:14px;">
@@ -2062,9 +2009,9 @@ const Components = {
     if (state.activePage === 'admin-dashboard') {
       const summary = (state.adminAnalytics && state.adminAnalytics.summary) || {
         total_users: 0,
-        total_scans: 0,
-        successful_scans: 0,
-        failed_scans: 0,
+        total_decodes: 0,
+        successful_decodes: 0,
+        failed_decodes: 0,
         reports_downloaded: 0
       };
 
@@ -2077,18 +2024,18 @@ const Components = {
               <span style="font-size:0.72rem; color:var(--success); font-weight:600;">Active nodes online</span>
             </div>
             <div class="glass-panel" style="padding:20px; border-radius:18px;">
-              <p style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-bottom:6px; font-weight:700;">Total Scans</p>
-              <h3 style="font-size:1.6rem; font-weight:800; color:var(--text-primary);">${summary.total_scans}</h3>
+              <p style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-bottom:6px; font-weight:700;">Total Decodes</p>
+              <h3 style="font-size:1.6rem; font-weight:800; color:var(--text-primary);">${summary.total_decodes}</h3>
               <span style="font-size:0.72rem; color:var(--accent-orange-bright); font-weight:600;">Telemetry activities</span>
             </div>
             <div class="glass-panel" style="padding:20px; border-radius:18px;">
-              <p style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-bottom:6px; font-weight:700;">Successful Scans</p>
-              <h3 style="font-size:1.6rem; font-weight:800; color:var(--success);">${summary.successful_scans}</h3>
+              <p style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-bottom:6px; font-weight:700;">Successful Decodes</p>
+              <h3 style="font-size:1.6rem; font-weight:800; color:var(--success);">${summary.successful_decodes}</h3>
               <span style="font-size:0.72rem; color:var(--success); font-weight:600;">High accuracy rate</span>
             </div>
             <div class="glass-panel" style="padding:20px; border-radius:18px;">
-              <p style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-bottom:6px; font-weight:700;">Failed Scans</p>
-              <h3 style="font-size:1.6rem; font-weight:800; color:var(--error);">${summary.failed_scans}</h3>
+              <p style="font-size:0.72rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-bottom:6px; font-weight:700;">Failed Decodes</p>
+              <h3 style="font-size:1.6rem; font-weight:800; color:var(--error);">${summary.failed_decodes}</h3>
               <span style="font-size:0.72rem; color:var(--error); font-weight:600;">Signal sweeps error</span>
             </div>
             <div class="glass-panel" style="padding:20px; border-radius:18px;">

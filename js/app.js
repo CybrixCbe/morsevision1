@@ -5,6 +5,31 @@
  * and admin command console system log timeline sweeps.
  */
 
+// Global API Base URL Override
+// Change this to your hosted Render backend URL (e.g., "https://your-backend.onrender.com") when deploying.
+// Leave as empty string "" for local development.
+const API_BASE_URL = "";
+
+if (API_BASE_URL) {
+  // Intercept Fetch API requests
+  const originalFetch = window.fetch;
+  window.fetch = function (resource, init) {
+    if (typeof resource === 'string' && resource.startsWith('/api/')) {
+      resource = API_BASE_URL + resource;
+    }
+    return originalFetch(resource, init);
+  };
+
+  // Intercept XMLHttpRequests (like upload progress tracking)
+  const originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url, ...args) {
+    if (typeof url === 'string' && url.startsWith('/api/')) {
+      url = API_BASE_URL + url;
+    }
+    return originalOpen.call(this, method, url, ...args);
+  };
+}
+
 class AppController {
   constructor() {
     this.state = {
@@ -679,7 +704,7 @@ class AppController {
             this.fetchTimelinesAndLogs();
             this.render();
           } else {
-            this.showToast(data.message || "Invalid email or password.", "error");
+            this.showToast(data.detail || data.message || "Invalid email or password.", "error");
           }
         })
         .catch(err => {
@@ -718,7 +743,7 @@ class AppController {
             this.render();
             this.startResendTimer();
           } else {
-            this.showToast(data.message || "Registration failed.", "error");
+            this.showToast(data.detail || data.message || "Registration failed.", "error");
           }
         })
         .catch(err => {
@@ -1500,25 +1525,6 @@ class AppController {
     });
 
     if (this.state.decodeStep === 1) {
-      // Tab selector bindings
-      document.querySelectorAll('.dashboard-seg-tab').forEach(tabBtn => {
-        tabBtn.addEventListener('click', (e) => {
-          e.preventDefault();
-          this.state.dashboardTab = tabBtn.getAttribute('data-tab');
-          this.render();
-        });
-      });
-
-      // Security sweep action
-      const btnRunSweep = document.getElementById('btn-run-security-sweep');
-      const scanSelector = document.getElementById('select-security-scan-type');
-      if (btnRunSweep && scanSelector) {
-        btnRunSweep.addEventListener('click', (e) => {
-          e.preventDefault();
-          const scanType = scanSelector.value;
-          this.executeSecurityScanAudit(scanType);
-        });
-      }
 
       const dropZone = document.getElementById('drag-drop-zone');
       const fileInput = document.getElementById('file-selector');
@@ -2088,91 +2094,6 @@ class AppController {
     })();
   }
 
-  executeSecurityScanAudit(scanType) {
-    this.state.decodeStep = 3;
-    this.state.decodeProgress = 0;
-    this.state.decodeLogs = [];
-    this.state.decodeStatusText = 'Initializing security scanner...';
-    this.state.cancelRef = { isAborted: false, abort: () => {} };
-
-    this.render();
-
-    const logs = [
-      `[INFO] Target: SYSTEM KERNEL NODE LOCALHOST`,
-      `[INFO] Starting audit scan: ${scanType}`,
-      `[INFO] Mapping network sockets and boundary rules...`,
-      `[INFO] Analysing system variables and telemetry limits...`,
-      `[SUCCESS] Scan execution complete. Zero anomaly flag detected.`
-    ];
-
-    let currentStep = 0;
-    const progressInterval = setInterval(() => {
-      if (this.state.cancelRef.isAborted) {
-        clearInterval(progressInterval);
-        return;
-      }
-
-      currentStep += 20;
-      this.state.decodeProgress = currentStep;
-      
-      const logIdx = Math.min(Math.floor(currentStep / 20) - 1, logs.length - 1);
-      if (logIdx >= 0 && logIdx < logs.length) {
-        const msg = logs[logIdx];
-        if (!this.state.decodeLogs.includes(msg)) {
-          this.state.decodeLogs.push(msg);
-          this.updateLogsDOM(msg);
-        }
-      }
-
-      if (currentStep >= 100) {
-        clearInterval(progressInterval);
-        this.state.decodeStatusText = 'Audit complete';
-        this.updateProgressDOM();
-
-        // Save activity record to backend
-        fetch('/api/user/activity', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.state.token}`
-          },
-          body: JSON.stringify({
-            activity_type: 'scan_execution',
-            scan_type: scanType
-          })
-        })
-        .then(() => {
-          this.fetchTimelinesAndLogs();
-        })
-        .catch(err => console.error("Failed to log scan activity:", err));
-
-        // Format result object to display details in Step 5 Result Panel
-        setTimeout(() => {
-          this.state.decodeStep = 5;
-          this.state.lastDecodeResult = {
-            text: `[SUCCESS] ${scanType} Audit Log Report\n=================================\nStatus: COMPLETED\nAnomaly Flag: 0\nSNR Quality: High\nScan details logged successfully.`,
-            morse: '',
-            confidence: '100%',
-            wpm: 'N/A',
-            carrierFreq: 'N/A',
-            duration: '0:02',
-            processingTime: '1.20s',
-            signalQuality: 'Excellent',
-            dotsCount: 0,
-            dashesCount: 0,
-            charactersCount: 120,
-            wordsCount: 15,
-            noiseLevel: '-45 dB',
-            decoderUsed: 'Security Core'
-          };
-          this.render();
-        }, 600);
-      } else {
-        this.state.decodeStatusText = `Running scan: ${currentStep}%`;
-        this.updateProgressDOM();
-      }
-    }, 250);
-  }
 
   executeRealDecryptionPipeline() {
     if (!this.state.uploadedFile) return;

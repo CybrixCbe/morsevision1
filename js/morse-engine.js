@@ -508,7 +508,7 @@ const MorseEngine = {
         for (let i = 0; i < channelData.length; i++) channelData[i] *= normScale;
       }
 
-      // 3. Scan dominant beep frequency (300Hz - 1200Hz)
+      // 3. Detect dominant beep frequency (300Hz - 1200Hz)
       let bestFreq = 800;
       let maxEnergy = 0;
       let energySumAll = 0;
