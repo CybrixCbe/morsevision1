@@ -47,44 +47,102 @@ for name, content in default_avatars.items():
         with open(path, "w") as f:
             f.write(content)
 
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:
+    psycopg2 = None
+    RealDictCursor = None
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+def is_postgres():
+    return psycopg2 is not None and DATABASE_URL and (DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres://"))
+
 # Helper functions for database interaction
 def get_db():
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
+    if is_postgres():
+        return psycopg2.connect(DATABASE_URL)
+    else:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
 
 def db_run(sql, params=[]):
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute(sql, params)
-    conn.commit()
-    last_id = cursor.lastrowid
-    conn.close()
-    return last_id
+    if is_postgres():
+        sql = sql.replace('?', '%s')
+        sql = sql.replace('INTEGER PRIMARY KEY AUTOINCREMENT', 'SERIAL PRIMARY KEY')
+        cursor.execute(sql, params)
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return None
+    else:
+        cursor.execute(sql, params)
+        conn.commit()
+        last_id = cursor.lastrowid
+        cursor.close()
+        conn.close()
+        return last_id
 
 def db_get(sql, params=[]):
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(sql, params)
-    row = cursor.fetchone()
-    conn.close()
-    return dict(row) if row else None
+    if is_postgres():
+        sql = sql.replace('date(created_at) = date(?)', 'created_at::date = %s::date')
+        sql = sql.replace('date(created_at) = date(%s)', 'created_at::date = %s::date')
+        sql = sql.replace('?', '%s')
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(sql, params)
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return dict(row) if row else None
+    else:
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return dict(row) if row else None
 
 def db_all(sql, params=[]):
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(sql, params)
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    if is_postgres():
+        sql = sql.replace('date(created_at) = date(?)', 'created_at::date = %s::date')
+        sql = sql.replace('date(created_at) = date(%s)', 'created_at::date = %s::date')
+        sql = sql.replace('?', '%s')
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return [dict(row) for row in rows]
+    else:
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return [dict(row) for row in rows]
 
 # Initialize Tables
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
     
+    def run_sql(sql, params=None):
+        if is_postgres():
+            sql = sql.replace('?', '%s')
+            sql = sql.replace('INTEGER PRIMARY KEY AUTOINCREMENT', 'SERIAL PRIMARY KEY')
+        if params is not None:
+            cursor.execute(sql, params)
+        else:
+            cursor.execute(sql)
+            
     # 1. USERS Table
-    cursor.execute("""
+    run_sql("""
     CREATE TABLE IF NOT EXISTS USERS (
         id TEXT PRIMARY KEY,
         name TEXT,
@@ -112,7 +170,7 @@ def init_db():
     """)
     
     # 2. OTP Table
-    cursor.execute("""
+    run_sql("""
     CREATE TABLE IF NOT EXISTS OTP (
         id TEXT PRIMARY KEY,
         email TEXT,
@@ -128,15 +186,23 @@ def init_db():
     """)
     
     # Check if old SCAN_HISTORY exists and rename to DECODE_HISTORY
-    try:
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='SCAN_HISTORY'")
-        if cursor.fetchone():
-            cursor.execute("ALTER TABLE SCAN_HISTORY RENAME TO DECODE_HISTORY")
-    except Exception:
-        pass
+    if is_postgres():
+        try:
+            run_sql("SELECT table_name FROM information_schema.tables WHERE LOWER(table_name)='scan_history'")
+            if cursor.fetchone():
+                run_sql("ALTER TABLE SCAN_HISTORY RENAME TO DECODE_HISTORY")
+        except Exception:
+            pass
+    else:
+        try:
+            run_sql("SELECT name FROM sqlite_master WHERE type='table' AND name='SCAN_HISTORY'")
+            if cursor.fetchone():
+                run_sql("ALTER TABLE SCAN_HISTORY RENAME TO DECODE_HISTORY")
+        except Exception:
+            pass
 
     # 3. DECODE_HISTORY Table
-    cursor.execute("""
+    run_sql("""
     CREATE TABLE IF NOT EXISTS DECODE_HISTORY (
         id TEXT PRIMARY KEY,
         user_id TEXT,
@@ -153,7 +219,7 @@ def init_db():
     """)
     
     # 4. ADMIN Table
-    cursor.execute("""
+    run_sql("""
     CREATE TABLE IF NOT EXISTS ADMIN (
         id TEXT PRIMARY KEY,
         username TEXT,
@@ -163,12 +229,12 @@ def init_db():
     )
     """)
     try:
-        cursor.execute("ALTER TABLE ADMIN ADD COLUMN avatar TEXT")
+        run_sql("ALTER TABLE ADMIN ADD COLUMN avatar TEXT")
     except Exception:
         pass
     
     # 5. SYSTEM_LOGS Table
-    cursor.execute("""
+    run_sql("""
     CREATE TABLE IF NOT EXISTS SYSTEM_LOGS (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         level TEXT,
@@ -178,7 +244,7 @@ def init_db():
     """)
     
     # 6. USER_ACTIVITY Table
-    cursor.execute("""
+    run_sql("""
     CREATE TABLE IF NOT EXISTS USER_ACTIVITY (
         id TEXT PRIMARY KEY,
         user_id TEXT,
@@ -188,23 +254,23 @@ def init_db():
     )
     """)
     try:
-        cursor.execute("ALTER TABLE USER_ACTIVITY RENAME COLUMN scan_type TO decode_type")
+        run_sql("ALTER TABLE USER_ACTIVITY RENAME COLUMN scan_type TO decode_type")
     except Exception:
         pass
     try:
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_created ON USER_ACTIVITY(created_at)")
+        run_sql("CREATE INDEX IF NOT EXISTS idx_activity_created ON USER_ACTIVITY(created_at)")
     except Exception:
         pass
 
     # 7. ANALYTICS_SUMMARY Table
     # Drop old table if it has total_scans column to recreate it cleanly
     try:
-        cursor.execute("SELECT total_scans FROM ANALYTICS_SUMMARY LIMIT 1")
-        cursor.execute("DROP TABLE ANALYTICS_SUMMARY")
+        run_sql("SELECT total_scans FROM ANALYTICS_SUMMARY LIMIT 1")
+        run_sql("DROP TABLE ANALYTICS_SUMMARY")
     except Exception:
         pass
 
-    cursor.execute("""
+    run_sql("""
     CREATE TABLE IF NOT EXISTS ANALYTICS_SUMMARY (
         id TEXT PRIMARY KEY,
         total_decodes INTEGER DEFAULT 0,
@@ -218,10 +284,10 @@ def init_db():
     
     # Initialize Default Admin Account
     admin_email = (os.getenv("ADMIN_EMAIL") or "admin@morsevision.io").lower().strip()
-    cursor.execute("SELECT * FROM ADMIN WHERE email = ?", (admin_email,))
+    run_sql("SELECT * FROM ADMIN WHERE email = ?", (admin_email,))
     if not cursor.fetchone():
         hashed = bcrypt.hashpw("AdminPass123!".encode(), bcrypt.gensalt()).decode()
-        cursor.execute(
+        run_sql(
             "INSERT INTO ADMIN (id, username, email, password_hash) VALUES (?, ?, ?, ?)",
             ("admin-uid-1122", "system_admin", admin_email, hashed)
         )
