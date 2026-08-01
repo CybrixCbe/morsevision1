@@ -1,6 +1,5 @@
 import os
 import secrets
-import sqlite3
 import datetime
 import bcrypt
 from jose import jwt
@@ -21,8 +20,6 @@ import json
 
 load_dotenv()
 
-# Setup database path
-db_path = os.path.join(os.path.dirname(__file__), 'database.sqlite')
 
 # Ensure uploads folder exists
 upload_dir = os.path.join(os.path.dirname(__file__), 'uploads')
@@ -47,95 +44,123 @@ for name, content in default_avatars.items():
         with open(path, "w") as f:
             f.write(content)
 
-try:
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
-except ImportError:
-    psycopg2 = None
-    RealDictCursor = None
+import pymysql
+from pymysql.cursors import DictCursor
+import threading
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+db_lock = threading.Lock()
+db_conn = None
 
-def is_postgres():
-    return psycopg2 is not None and DATABASE_URL and (DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres://"))
-
-# Helper functions for database interaction
 def get_db():
-    if is_postgres():
-        return psycopg2.connect(DATABASE_URL)
-    else:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    global db_conn
+    with db_lock:
+        if db_conn is None or not db_conn.open:
+            db_host = os.getenv("DB_HOST") or "127.0.0.1"
+            db_port = int(os.getenv("DB_PORT") or "3306")
+            db_name = os.getenv("DB_NAME") or "morsevision"
+            db_user = os.getenv("DB_USER") or "root"
+            db_password = os.getenv("DB_PASSWORD") or ""
+            
+            db_url = os.getenv("DATABASE_URL")
+            if db_url:
+                parsed = urllib.parse.urlparse(db_url)
+                db_host = parsed.hostname or db_host
+                db_port = parsed.port or db_port
+                db_user = parsed.username or db_user
+                db_password = parsed.password or db_password
+                db_name = parsed.path.lstrip('/') or db_name
+                
+            try:
+                # Ensure the database schema exists
+                temp_conn = pymysql.connect(
+                    host=db_host,
+                    port=db_port,
+                    user=db_user,
+                    password=db_password,
+                    autocommit=True
+                )
+                with temp_conn.cursor() as cursor:
+                    cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name}")
+                temp_conn.close()
+                
+                db_conn = pymysql.connect(
+                    host=db_host,
+                    port=db_port,
+                    user=db_user,
+                    password=db_password,
+                    database=db_name,
+                    cursorclass=DictCursor,
+                    autocommit=True
+                )
+            except pymysql.MySQLError as e:
+                err_msg = f"MySQL connection failed: {e.args[1]} (Code {e.args[0]})"
+                print(f"[DB ERROR]: {err_msg}")
+                raise HTTPException(status_code=500, detail=err_msg)
+            except Exception as e:
+                print(f"[DB ERROR]: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+        return db_conn
 
 def db_run(sql, params=[]):
+    sql = sql.replace('?', '%s')
+    # Replace SQLite types to MySQL types
+    sql = sql.replace('TEXT PRIMARY KEY', 'VARCHAR(255) PRIMARY KEY')
+    sql = sql.replace('TEXT UNIQUE', 'VARCHAR(255) UNIQUE')
+    sql = sql.replace('INTEGER PRIMARY KEY AUTOINCREMENT', 'INT AUTO_INCREMENT PRIMARY KEY')
+    
     conn = get_db()
-    cursor = conn.cursor()
-    if is_postgres():
-        sql = sql.replace('?', '%s')
-        sql = sql.replace('INTEGER PRIMARY KEY AUTOINCREMENT', 'SERIAL PRIMARY KEY')
-        cursor.execute(sql, params)
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return None
-    else:
-        cursor.execute(sql, params)
-        conn.commit()
-        last_id = cursor.lastrowid
-        cursor.close()
-        conn.close()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(sql, params)
+            last_id = cursor.lastrowid
         return last_id
+    except pymysql.MySQLError as e:
+        err_msg = f"MySQL execution error: {e.args[1]} (Code {e.args[0]})"
+        print(f"[DB ERROR]: Query: {sql} | Error: {err_msg}")
+        raise HTTPException(status_code=400, detail=err_msg)
 
 def db_get(sql, params=[]):
+    sql = sql.replace('?', '%s')
     conn = get_db()
-    if is_postgres():
-        sql = sql.replace('date(created_at) = date(?)', 'created_at::date = %s::date')
-        sql = sql.replace('date(created_at) = date(%s)', 'created_at::date = %s::date')
-        sql = sql.replace('?', '%s')
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(sql, params)
-        row = cursor.fetchone()
-        cursor.close()
-        conn.close()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(sql, params)
+            row = cursor.fetchone()
         return dict(row) if row else None
-    else:
-        cursor = conn.cursor()
-        cursor.execute(sql, params)
-        row = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        return dict(row) if row else None
+    except pymysql.MySQLError as e:
+        err_msg = f"MySQL query error: {e.args[1]} (Code {e.args[0]})"
+        print(f"[DB ERROR]: Query: {sql} | Error: {err_msg}")
+        raise HTTPException(status_code=400, detail=err_msg)
 
 def db_all(sql, params=[]):
+    sql = sql.replace('?', '%s')
     conn = get_db()
-    if is_postgres():
-        sql = sql.replace('date(created_at) = date(?)', 'created_at::date = %s::date')
-        sql = sql.replace('date(created_at) = date(%s)', 'created_at::date = %s::date')
-        sql = sql.replace('?', '%s')
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(sql, params)
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
         return [dict(row) for row in rows]
-    else:
-        cursor = conn.cursor()
-        cursor.execute(sql, params)
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return [dict(row) for row in rows]
+    except pymysql.MySQLError as e:
+        err_msg = f"MySQL query error: {e.args[1]} (Code {e.args[0]})"
+        print(f"[DB ERROR]: Query: {sql} | Error: {err_msg}")
+        raise HTTPException(status_code=400, detail=err_msg)
 
 # Initialize Tables
 def init_db():
-    conn = get_db()
-    cursor = conn.cursor()
-    
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        print("MySQL connected successfully.")
+    except Exception as e:
+        print(f"MySQL connection failed: {e}")
+        raise e
+        
     def run_sql(sql, params=None):
-        if is_postgres():
-            sql = sql.replace('?', '%s')
-            sql = sql.replace('INTEGER PRIMARY KEY AUTOINCREMENT', 'SERIAL PRIMARY KEY')
+        sql = sql.replace('?', '%s')
+        sql = sql.replace('TEXT PRIMARY KEY', 'VARCHAR(255) PRIMARY KEY')
+        sql = sql.replace('TEXT UNIQUE', 'VARCHAR(255) UNIQUE')
+        sql = sql.replace('INTEGER PRIMARY KEY AUTOINCREMENT', 'INT AUTO_INCREMENT PRIMARY KEY')
+        
         if params is not None:
             cursor.execute(sql, params)
         else:
@@ -144,17 +169,17 @@ def init_db():
     # 1. USERS Table
     run_sql("""
     CREATE TABLE IF NOT EXISTS USERS (
-        id TEXT PRIMARY KEY,
+        id VARCHAR(255) PRIMARY KEY,
         name TEXT,
-        email TEXT UNIQUE,
+        email VARCHAR(255) UNIQUE,
         password_hash TEXT,
         is_verified INTEGER DEFAULT 0,
         created_at TEXT,
         last_login TEXT,
-        account_status TEXT DEFAULT 'active',
+        account_status VARCHAR(255) DEFAULT 'active',
         failed_attempts INTEGER DEFAULT 0,
-        role TEXT DEFAULT 'User',
-        provider TEXT DEFAULT 'local',
+        role VARCHAR(255) DEFAULT 'User',
+        provider VARCHAR(255) DEFAULT 'local',
         provider_id TEXT,
         avatar TEXT,
         organization TEXT,
@@ -163,7 +188,7 @@ def init_db():
         experience_level TEXT,
         country TEXT,
         timezone TEXT,
-        preferred_theme TEXT DEFAULT 'dark',
+        preferred_theme VARCHAR(255) DEFAULT 'dark',
         notification_prefs TEXT,
         profile_completed INTEGER DEFAULT 0
     )
@@ -172,42 +197,26 @@ def init_db():
     # 2. OTP Table
     run_sql("""
     CREATE TABLE IF NOT EXISTS OTP (
-        id TEXT PRIMARY KEY,
+        id VARCHAR(255) PRIMARY KEY,
         email TEXT,
         otp TEXT,
         created_at TEXT,
         expires_at TEXT,
         attempts INTEGER DEFAULT 0,
         is_used INTEGER DEFAULT 0,
-        purpose TEXT DEFAULT 'register',
+        purpose VARCHAR(255) DEFAULT 'register',
         name TEXT,
         password_hash TEXT
     )
     """)
-    
-    # Check if old SCAN_HISTORY exists and rename to DECODE_HISTORY
-    if is_postgres():
-        try:
-            run_sql("SELECT table_name FROM information_schema.tables WHERE LOWER(table_name)='scan_history'")
-            if cursor.fetchone():
-                run_sql("ALTER TABLE SCAN_HISTORY RENAME TO DECODE_HISTORY")
-        except Exception:
-            pass
-    else:
-        try:
-            run_sql("SELECT name FROM sqlite_master WHERE type='table' AND name='SCAN_HISTORY'")
-            if cursor.fetchone():
-                run_sql("ALTER TABLE SCAN_HISTORY RENAME TO DECODE_HISTORY")
-        except Exception:
-            pass
 
     # 3. DECODE_HISTORY Table
     run_sql("""
     CREATE TABLE IF NOT EXISTS DECODE_HISTORY (
-        id TEXT PRIMARY KEY,
-        user_id TEXT,
+        id VARCHAR(255) PRIMARY KEY,
+        user_id VARCHAR(255),
         filename TEXT,
-        decoder_type TEXT,
+        decoder_type VARCHAR(255),
         decoded_morse TEXT,
         decoded_text TEXT,
         confidence TEXT,
@@ -221,23 +230,19 @@ def init_db():
     # 4. ADMIN Table
     run_sql("""
     CREATE TABLE IF NOT EXISTS ADMIN (
-        id TEXT PRIMARY KEY,
-        username TEXT,
-        email TEXT UNIQUE,
+        id VARCHAR(255) PRIMARY KEY,
+        username VARCHAR(255),
+        email VARCHAR(255) UNIQUE,
         password_hash TEXT,
         avatar TEXT
     )
     """)
-    try:
-        run_sql("ALTER TABLE ADMIN ADD COLUMN avatar TEXT")
-    except Exception:
-        pass
     
     # 5. SYSTEM_LOGS Table
     run_sql("""
     CREATE TABLE IF NOT EXISTS SYSTEM_LOGS (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        level TEXT,
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        level VARCHAR(255),
         text TEXT,
         time TEXT
     )
@@ -246,33 +251,22 @@ def init_db():
     # 6. USER_ACTIVITY Table
     run_sql("""
     CREATE TABLE IF NOT EXISTS USER_ACTIVITY (
-        id TEXT PRIMARY KEY,
-        user_id TEXT,
-        activity_type TEXT,
-        decode_type TEXT,
+        id VARCHAR(255) PRIMARY KEY,
+        user_id VARCHAR(255),
+        activity_type VARCHAR(255),
+        decode_type VARCHAR(255),
         created_at TEXT
     )
     """)
     try:
-        run_sql("ALTER TABLE USER_ACTIVITY RENAME COLUMN scan_type TO decode_type")
-    except Exception:
-        pass
-    try:
-        run_sql("CREATE INDEX IF NOT EXISTS idx_activity_created ON USER_ACTIVITY(created_at)")
+        run_sql("CREATE INDEX idx_activity_created ON USER_ACTIVITY(created_at(19))")
     except Exception:
         pass
 
     # 7. ANALYTICS_SUMMARY Table
-    # Drop old table if it has total_scans column to recreate it cleanly
-    try:
-        run_sql("SELECT total_scans FROM ANALYTICS_SUMMARY LIMIT 1")
-        run_sql("DROP TABLE ANALYTICS_SUMMARY")
-    except Exception:
-        pass
-
     run_sql("""
     CREATE TABLE IF NOT EXISTS ANALYTICS_SUMMARY (
-        id TEXT PRIMARY KEY,
+        id VARCHAR(255) PRIMARY KEY,
         total_decodes INTEGER DEFAULT 0,
         total_users INTEGER DEFAULT 0,
         successful_decodes INTEGER DEFAULT 0,
@@ -282,19 +276,185 @@ def init_db():
     )
     """)
     
+    # Required MySQL Tables from User Request
+    # user_profiles
+    run_sql("""
+    CREATE TABLE IF NOT EXISTS user_profiles (
+        id VARCHAR(255) PRIMARY KEY,
+        user_id VARCHAR(255),
+        bio TEXT
+    )
+    """)
+    # oauth_accounts
+    run_sql("""
+    CREATE TABLE IF NOT EXISTS oauth_accounts (
+        id VARCHAR(255) PRIMARY KEY,
+        user_id VARCHAR(255),
+        provider VARCHAR(255),
+        provider_id VARCHAR(255)
+    )
+    """)
+    # sessions
+    run_sql("""
+    CREATE TABLE IF NOT EXISTS sessions (
+        id VARCHAR(255) PRIMARY KEY,
+        user_id VARCHAR(255),
+        token TEXT,
+        expires_at TEXT
+    )
+    """)
+    # notifications
+    run_sql("""
+    CREATE TABLE IF NOT EXISTS notifications (
+        id VARCHAR(255) PRIMARY KEY,
+        user_id VARCHAR(255),
+        message TEXT,
+        is_read INTEGER DEFAULT 0,
+        created_at TEXT
+    )
+    """)
+    # activity_logs
+    run_sql("""
+    CREATE TABLE IF NOT EXISTS activity_logs (
+        id VARCHAR(255) PRIMARY KEY,
+        user_id VARCHAR(255),
+        activity TEXT,
+        created_at TEXT
+    )
+    """)
+    # application_settings
+    run_sql("""
+    CREATE TABLE IF NOT EXISTS application_settings (
+        setting_key VARCHAR(255) PRIMARY KEY,
+        setting_value TEXT
+    )
+    """)
+
     # Initialize Default Admin Account
     admin_email = (os.getenv("ADMIN_EMAIL") or "admin@morsevision.io").lower().strip()
-    run_sql("SELECT * FROM ADMIN WHERE email = ?", (admin_email,))
+    cursor.execute("SELECT * FROM ADMIN WHERE email = %s", (admin_email,))
     if not cursor.fetchone():
         hashed = bcrypt.hashpw("AdminPass123!".encode(), bcrypt.gensalt()).decode()
-        run_sql(
-            "INSERT INTO ADMIN (id, username, email, password_hash) VALUES (?, ?, ?, ?)",
+        cursor.execute(
+            "INSERT INTO ADMIN (id, username, email, password_hash) VALUES (%s, %s, %s, %s)",
             ("admin-uid-1122", "system_admin", admin_email, hashed)
         )
         print("Administrator account initialized successfully.")
     
-    conn.commit()
+    cursor.close()
     conn.close()
+    
+    # Run SQLite migration if SQLite file exists
+    migrate_from_sqlite()
+
+def migrate_from_sqlite():
+    sqlite_file = os.path.join(os.path.dirname(__file__), 'database.sqlite')
+    if os.path.exists(sqlite_file):
+        print("[MIGRATION] SQLite database found. Migrating data to MySQL...")
+        import sqlite3
+        try:
+            s_conn = sqlite3.connect(sqlite_file)
+            s_conn.row_factory = sqlite3.Row
+            s_cursor = s_conn.cursor()
+            
+            def table_exists(t_name):
+                s_cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (t_name,))
+                return s_cursor.fetchone() is not None
+
+            # Migrate USERS
+            if table_exists("USERS"):
+                s_cursor.execute("SELECT * FROM USERS")
+                for row in s_cursor.fetchall():
+                    data = dict(row)
+                    val_tuple = (
+                        data.get("id"), data.get("name"), data.get("email"), data.get("password_hash"),
+                        data.get("is_verified"), data.get("created_at"), data.get("last_login"),
+                        data.get("account_status"), data.get("failed_attempts"), data.get("role"),
+                        data.get("provider"), data.get("provider_id"), data.get("avatar"),
+                        data.get("organization"), data.get("department"), data.get("purpose"),
+                        data.get("experience_level"), data.get("country"), data.get("timezone"),
+                        data.get("preferred_theme"), data.get("notification_prefs"), data.get("profile_completed")
+                    )
+                    db_run("INSERT IGNORE INTO USERS (id, name, email, password_hash, is_verified, created_at, last_login, account_status, failed_attempts, role, provider, provider_id, avatar, organization, department, purpose, experience_level, country, timezone, preferred_theme, notification_prefs, profile_completed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", val_tuple)
+
+            # Migrate OTP
+            if table_exists("OTP"):
+                s_cursor.execute("SELECT * FROM OTP")
+                for row in s_cursor.fetchall():
+                    data = dict(row)
+                    val_tuple = (
+                        data.get("id"), data.get("email"), data.get("otp"), data.get("created_at"),
+                        data.get("expires_at"), data.get("attempts"), data.get("is_used"),
+                        data.get("purpose"), data.get("name"), data.get("password_hash")
+                    )
+                    db_run("INSERT IGNORE INTO OTP (id, email, otp, created_at, expires_at, attempts, is_used, purpose, name, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", val_tuple)
+
+            # Migrate DECODE_HISTORY
+            t_hist = "DECODE_HISTORY" if table_exists("DECODE_HISTORY") else "SCAN_HISTORY"
+            if table_exists(t_hist):
+                s_cursor.execute(f"SELECT * FROM {t_hist}")
+                for row in s_cursor.fetchall():
+                    data = dict(row)
+                    val_tuple = (
+                        data.get("id"), data.get("user_id"), data.get("filename"), data.get("decoder_type"),
+                        data.get("decoded_morse"), data.get("decoded_text"), data.get("confidence"),
+                        data.get("processing_time"), data.get("wpm"), data.get("carrier_freq"), data.get("created_at")
+                    )
+                    db_run("INSERT IGNORE INTO DECODE_HISTORY (id, user_id, filename, decoder_type, decoded_morse, decoded_text, confidence, processing_time, wpm, carrier_freq, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", val_tuple)
+
+            # Migrate ADMIN
+            if table_exists("ADMIN"):
+                s_cursor.execute("SELECT * FROM ADMIN")
+                for row in s_cursor.fetchall():
+                    data = dict(row)
+                    val_tuple = (
+                        data.get("id"), data.get("username"), data.get("email"),
+                        data.get("password_hash"), data.get("avatar")
+                    )
+                    db_run("INSERT IGNORE INTO ADMIN (id, username, email, password_hash, avatar) VALUES (?, ?, ?, ?, ?)", val_tuple)
+
+            # Migrate SYSTEM_LOGS
+            if table_exists("SYSTEM_LOGS"):
+                s_cursor.execute("SELECT * FROM SYSTEM_LOGS")
+                for row in s_cursor.fetchall():
+                    data = dict(row)
+                    val_tuple = (
+                        data.get("id"), data.get("level"), data.get("text"), data.get("time")
+                    )
+                    db_run("INSERT IGNORE INTO SYSTEM_LOGS (id, level, text, time) VALUES (?, ?, ?, ?)", val_tuple)
+
+            # Migrate USER_ACTIVITY
+            if table_exists("USER_ACTIVITY"):
+                s_cursor.execute("SELECT * FROM USER_ACTIVITY")
+                for row in s_cursor.fetchall():
+                    data = dict(row)
+                    val_tuple = (
+                        data.get("id"), data.get("user_id"), data.get("activity_type"),
+                        data.get("decode_type") or data.get("scan_type"), data.get("created_at")
+                    )
+                    db_run("INSERT IGNORE INTO USER_ACTIVITY (id, user_id, activity_type, decode_type, created_at) VALUES (?, ?, ?, ?, ?)", val_tuple)
+
+            # Migrate ANALYTICS_SUMMARY
+            if table_exists("ANALYTICS_SUMMARY"):
+                s_cursor.execute("SELECT * FROM ANALYTICS_SUMMARY")
+                for row in s_cursor.fetchall():
+                    data = dict(row)
+                    val_tuple = (
+                        data.get("id"),
+                        data.get("total_decodes") or data.get("total_scans") or 0,
+                        data.get("total_users") or 0,
+                        data.get("successful_decodes") or data.get("successful_scans") or 0,
+                        data.get("failed_decodes") or data.get("failed_scans") or 0,
+                        data.get("reports_downloaded") or 0,
+                        data.get("updated_at")
+                    )
+                    db_run("INSERT IGNORE INTO ANALYTICS_SUMMARY (id, total_decodes, total_users, successful_decodes, failed_decodes, reports_downloaded, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", val_tuple)
+            
+            s_conn.close()
+            print("[MIGRATION] Data migration completed successfully. Removing SQLite database file...")
+            os.remove(sqlite_file)
+        except Exception as e:
+            print(f"[MIGRATION ERROR] SQLite migration failed: {e}")
 
 init_db()
 

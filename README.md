@@ -1,6 +1,6 @@
 # 📡 MorseVision
 
-**MorseVision** is a premium, standalone, AI-powered Morse Code Signal Ingest, Analysis, and Decryption platform. Designed with a high-end glassmorphism dark cyber aesthetics interface, it integrates Goertzel Digital Signal Processing (DSP) for audio analysis and Computer Vision tracking for video eye-blink decoding, logging all telemetry activities dynamically into a SQLite database.
+**MorseVision** is a premium, standalone, AI-powered Morse Code Signal Ingest, Analysis, and Decryption platform. Designed with a high-end glassmorphism dark cyber aesthetics interface, it integrates Goertzel Digital Signal Processing (DSP) for audio analysis and Computer Vision tracking for video eye-blink decoding, logging all telemetry activities dynamically into a MySQL database.
 
 ---
 
@@ -22,7 +22,7 @@
 ### 👥 3. Operator Registry & Node Security
 * **Node Administration:** Control panel to register operators, change roles, edit profile parameters, toggle active status, and reset passkeys.
 * **System Logs Console:** Real-time stream of backend events, kernel actions, and database writes.
-* **Secure Access Controls:** Session authorization with JWT tokens and optional Google/GitHub OAuth integrations.
+* **Secure Access Controls:** Operator authorization with JWT tokens and optional Google/GitHub OAuth integrations.
 * **Zero-Trust Policy Controls:** Enable enforced strong passkey rules and SMTP one-time passcode verification for administrators.
 
 ### 🖼️ 4. Operator Settings & Custom Profile pictures
@@ -36,7 +36,7 @@
 * **Backend:**
   * [FastAPI](https://fastapi.tiangolo.com/) (Web framework)
   * [Uvicorn](https://www.uvicorn.org/) (ASGI Server)
-  * SQLite (Persistent local SQL relational database)
+  * MySQL (Persistent relational database)
   * PyJWT & Bcrypt (Secure JWT authentication and password hashing)
 * **Frontend:**
   * HTML5 & CSS3 (Glassmorphism layout framework and custom CSS properties)

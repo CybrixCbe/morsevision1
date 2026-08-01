@@ -2408,7 +2408,7 @@ const Components = {
           
           <div id="admin-system-logs-console" style="background:#050507; border:1px solid var(--border-glass-hover); border-radius:16px; height:340px; overflow-y:auto; padding:20px; font-family:var(--font-mono); font-size:0.82rem; color:#A0A0A0; line-height:1.6; white-space:pre-wrap;">
             <div style="color:var(--text-muted);">[SYSTEM-INIT] Loading MorseVision AI Kernel...</div>
-            <div style="color:var(--text-muted);">[SYSTEM-INIT] Connecting SQLite timeline database...</div>
+            <div style="color:var(--text-muted);">[SYSTEM-INIT] Connecting MySQL database...</div>
             <div style="color:var(--success);">[SUCCESS] Database connection verified on port 3000.</div>
             <div style="color:var(--accent-orange-bright);">[INFO] Listening for audio/video Morse signal streams...</div>
           </div>
