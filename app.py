@@ -462,7 +462,7 @@ init_db()
 def log_event(level, text):
     time_str = datetime.datetime.utcnow().isoformat()
     db_run("INSERT INTO SYSTEM_LOGS (level, text, time) VALUES (?, ?, ?)", [level, text, time_str])
-    db_run("DELETE FROM SYSTEM_LOGS WHERE id NOT IN (SELECT id FROM SYSTEM_LOGS ORDER BY time DESC LIMIT 100)")
+    db_run("DELETE FROM SYSTEM_LOGS WHERE id NOT IN (SELECT id FROM (SELECT id FROM SYSTEM_LOGS ORDER BY time DESC LIMIT 100) as temp)")
     print(f"[SYS-{level}]: {text}")
 
 def log_activity(user_id, activity_type, decode_type=None):
