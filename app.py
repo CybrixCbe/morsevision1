@@ -532,10 +532,17 @@ def send_mail(to: str, subject: str, html_text: str) -> bool:
 
 app = FastAPI(title="MorseVision Python Backend")
 
+# CORS Configuration
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS")
+if allowed_origins_env:
+    origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
+else:
+    origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=origins,
+    allow_credentials=True if "*" not in origins else False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

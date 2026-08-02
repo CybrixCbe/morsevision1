@@ -8,7 +8,7 @@
 // Global API Base URL Override
 // Change this to your hosted Render backend URL (e.g., "https://your-backend.onrender.com") when deploying.
 // Leave as empty string "" for local development.
-const API_BASE_URL = "";
+const API_BASE_URL = localStorage.getItem('API_BASE_URL') || "";
 
 if (API_BASE_URL) {
   // Intercept Fetch API requests
@@ -604,7 +604,7 @@ class AppController {
         } else {
           this.showToast("Connecting to Google OAuth...", "info");
           setTimeout(() => {
-            window.location.href = '/api/auth/google';
+            window.location.href = (API_BASE_URL || '') + '/api/auth/google';
           }, 300);
         }
       });
@@ -618,7 +618,7 @@ class AppController {
         } else {
           this.showToast("Connecting to GitHub OAuth...", "info");
           setTimeout(() => {
-            window.location.href = '/api/auth/github';
+            window.location.href = (API_BASE_URL || '') + '/api/auth/github';
           }, 300);
         }
       });
