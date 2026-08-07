@@ -47,14 +47,80 @@ for name, content in default_avatars.items():
 import pymysql
 from pymysql.cursors import DictCursor
 import threading
+import sqlite3
 
 db_lock = threading.Lock()
 db_conn = None
+use_sqlite = False
+
+class SQLiteCursorWrapper:
+    def __init__(self, sqlite_cursor):
+        self.cursor = sqlite_cursor
+
+    def execute(self, sql, params=None):
+        # Translate MySQL syntax and placeholders back to SQLite
+        sql = sql.replace('%s', '?')
+        sql = sql.replace('INT AUTO_INCREMENT PRIMARY KEY', 'INTEGER PRIMARY KEY AUTOINCREMENT')
+        sql = sql.replace('VARCHAR(255) PRIMARY KEY', 'TEXT PRIMARY KEY')
+        sql = sql.replace('VARCHAR(255) UNIQUE', 'TEXT UNIQUE')
+        sql = sql.replace('INSERT IGNORE INTO', 'INSERT OR IGNORE INTO')
+        
+        if params is not None:
+            self.cursor.execute(sql, params)
+        else:
+            self.cursor.execute(sql)
+        return self
+
+    def fetchone(self):
+        row = self.cursor.fetchone()
+        return dict(row) if row else None
+
+    def fetchall(self):
+        rows = self.cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    @property
+    def lastrowid(self):
+        return self.cursor.lastrowid
+
+    def close(self):
+        self.cursor.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+class SQLiteConnectionWrapper:
+    def __init__(self, sqlite_conn):
+        self.conn = sqlite_conn
+        self.open = True
+
+    def cursor(self):
+        self.conn.row_factory = sqlite3.Row
+        return SQLiteCursorWrapper(self.conn.cursor())
+
+    def commit(self):
+        self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
+
+    def close(self):
+        self.conn.close()
+        self.open = False
 
 def get_db():
-    global db_conn
+    global db_conn, use_sqlite
     with db_lock:
         if db_conn is None or not db_conn.open:
+            if use_sqlite:
+                sqlite_path = os.path.join(os.path.dirname(__file__), 'database.sqlite')
+                conn = sqlite3.connect(sqlite_path)
+                db_conn = SQLiteConnectionWrapper(conn)
+                return db_conn
+
             db_host = os.getenv("DB_HOST") or "127.0.0.1"
             db_port = int(os.getenv("DB_PORT") or "3306")
             db_name = os.getenv("DB_NAME") or "morsevision"
@@ -92,13 +158,12 @@ def get_db():
                     cursorclass=DictCursor,
                     autocommit=True
                 )
-            except pymysql.MySQLError as e:
-                err_msg = f"MySQL connection failed: {e.args[1]} (Code {e.args[0]})"
-                print(f"[DB ERROR]: {err_msg}")
-                raise HTTPException(status_code=500, detail=err_msg)
             except Exception as e:
-                print(f"[DB ERROR]: {e}")
-                raise HTTPException(status_code=500, detail=str(e))
+                print(f"[DB WARN]: MySQL connection failed ({e}). Falling back to SQLite...")
+                use_sqlite = True
+                sqlite_path = os.path.join(os.path.dirname(__file__), 'database.sqlite')
+                conn = sqlite3.connect(sqlite_path)
+                db_conn = SQLiteConnectionWrapper(conn)
         return db_conn
 
 def db_run(sql, params=[]):
@@ -348,6 +413,8 @@ def init_db():
     migrate_from_sqlite()
 
 def migrate_from_sqlite():
+    if use_sqlite:
+        return
     sqlite_file = os.path.join(os.path.dirname(__file__), 'database.sqlite')
     if os.path.exists(sqlite_file):
         print("[MIGRATION] SQLite database found. Migrating data to MySQL...")
@@ -963,6 +1030,15 @@ def get_auth_config():
         "githubConfigured": bool(github_client_id and github_client_id.strip() and github_client_secret and github_client_secret.strip())
     }
 
+def get_frontend_redirect_url(path: str) -> str:
+    allowed_origins = os.getenv("ALLOWED_ORIGINS")
+    if allowed_origins:
+        origins_list = [o.strip() for o in allowed_origins.split(",") if o.strip()]
+        if origins_list and "*" not in origins_list:
+            frontend = origins_list[0].rstrip("/")
+            return f"{frontend}{path}"
+    return path
+
 @app.get("/api/auth/google")
 def google_login():
     client_id = os.getenv("GOOGLE_CLIENT_ID")
@@ -983,9 +1059,9 @@ def google_login():
 @app.get("/api/auth/google/callback")
 def google_callback(code: str = None, error: str = None):
     if error:
-        return RedirectResponse(f"/?oauth_error={urllib.parse.quote(error)}")
+        return RedirectResponse(get_frontend_redirect_url(f"/?oauth_error={urllib.parse.quote(error)}"))
     if not code:
-        return RedirectResponse("/?oauth_error=No%20authorization%20code%20provided")
+        return RedirectResponse(get_frontend_redirect_url("/?oauth_error=No%20authorization%20code%20provided"))
         
     client_id = os.getenv("GOOGLE_CLIENT_ID")
     client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -1017,14 +1093,14 @@ def google_callback(code: str = None, error: str = None):
         avatar = profile.get("picture")
         
         if not email:
-            return RedirectResponse("/?oauth_error=No%20email%20returned%20from%20Google")
+            return RedirectResponse(get_frontend_redirect_url("/?oauth_error=No%20email%20returned%20from%20Google"))
             
         email_lower = email.lower().strip()
         user = db_get("SELECT * FROM USERS WHERE email = ?", [email_lower])
         
         if user:
             if user["account_status"] == 'suspended':
-                 return RedirectResponse("/?oauth_error=Access%20denied.%20Account%20suspended.")
+                 return RedirectResponse(get_frontend_redirect_url("/?oauth_error=Access%20denied.%20Account%20suspended."))
             db_run("UPDATE USERS SET last_login = ? WHERE id = ?", [datetime.datetime.utcnow().isoformat(), user["id"]])
         else:
             user_id = f"usr-{uuid.uuid4()}"
@@ -1047,15 +1123,17 @@ def google_callback(code: str = None, error: str = None):
         
         profile_completed = 1 if user.get("profile_completed") else 0
         return RedirectResponse(
-            f"/?token={token}"
-            f"&email={urllib.parse.quote(user['email'])}"
-            f"&name={urllib.parse.quote(user['name'])}"
-            f"&role={urllib.parse.quote(user['role'])}"
-            f"&profile_completed={profile_completed}"
+            get_frontend_redirect_url(
+                f"/?token={token}"
+                f"&email={urllib.parse.quote(user['email'])}"
+                f"&name={urllib.parse.quote(user['name'])}"
+                f"&role={urllib.parse.quote(user['role'])}"
+                f"&profile_completed={profile_completed}"
+            )
         )
     except Exception as e:
         log_event("ERROR", f"Google OAuth callback error: {str(e)}")
-        return RedirectResponse(f"/?oauth_error={urllib.parse.quote(str(e))}")
+        return RedirectResponse(get_frontend_redirect_url(f"/?oauth_error={urllib.parse.quote(str(e))}"))
 
 @app.get("/api/auth/github")
 def github_login():
@@ -1076,9 +1154,9 @@ def github_login():
 def github_callback(code: str = None, error: str = None, error_description: str = None):
     if error:
         err_msg = error_description or error
-        return RedirectResponse(f"/?oauth_error={urllib.parse.quote(err_msg)}")
+        return RedirectResponse(get_frontend_redirect_url(f"/?oauth_error={urllib.parse.quote(err_msg)}"))
     if not code:
-        return RedirectResponse("/?oauth_error=No%20authorization%20code%20provided")
+        return RedirectResponse(get_frontend_redirect_url("/?oauth_error=No%20authorization%20code%20provided"))
         
     client_id = os.getenv("GITHUB_CLIENT_ID")
     client_secret = os.getenv("GITHUB_CLIENT_SECRET")
@@ -1104,7 +1182,7 @@ def github_callback(code: str = None, error: str = None, error_description: str 
             
         if not access_token:
             err_msg = res_data.get("error_description") or res_data.get("error") or "Failed to retrieve access token"
-            return RedirectResponse(f"/?oauth_error={urllib.parse.quote(err_msg)}")
+            return RedirectResponse(get_frontend_redirect_url(f"/?oauth_error={urllib.parse.quote(err_msg)}"))
             
         user_url = "https://api.github.com/user"
         req_user = urllib.request.Request(
@@ -1145,7 +1223,7 @@ def github_callback(code: str = None, error: str = None, error_description: str 
         
         if user:
             if user["account_status"] == 'suspended':
-                 return RedirectResponse("/?oauth_error=Access%20denied.%20Account%20suspended.")
+                 return RedirectResponse(get_frontend_redirect_url("/?oauth_error=Access%20denied.%20Account%20suspended."))
             db_run("UPDATE USERS SET last_login = ? WHERE id = ?", [datetime.datetime.utcnow().isoformat(), user["id"]])
         else:
             user_id = f"usr-{uuid.uuid4()}"
@@ -1168,15 +1246,17 @@ def github_callback(code: str = None, error: str = None, error_description: str 
         
         profile_completed = 1 if user.get("profile_completed") else 0
         return RedirectResponse(
-            f"/?token={token}"
-            f"&email={urllib.parse.quote(user['email'])}"
-            f"&name={urllib.parse.quote(user['name'])}"
-            f"&role={urllib.parse.quote(user['role'])}"
-            f"&profile_completed={profile_completed}"
+            get_frontend_redirect_url(
+                f"/?token={token}"
+                f"&email={urllib.parse.quote(user['email'])}"
+                f"&name={urllib.parse.quote(user['name'])}"
+                f"&role={urllib.parse.quote(user['role'])}"
+                f"&profile_completed={profile_completed}"
+            )
         )
     except Exception as e:
         log_event("ERROR", f"GitHub OAuth callback error: {str(e)}")
-        return RedirectResponse(f"/?oauth_error={urllib.parse.quote(str(e))}")
+        return RedirectResponse(get_frontend_redirect_url(f"/?oauth_error={urllib.parse.quote(str(e))}"))
 
 @app.post("/api/auth/google")
 def google_auth(payload: dict):
@@ -1733,6 +1813,8 @@ def restore_backup(data: dict, admin: dict = Depends(get_current_admin)):
             col_list = ", ".join(columns)
             placeholders = ", ".join(["?"] * len(columns))
             sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
+            if not use_sqlite:
+                sql = sql.replace('?', '%s')
             
             for row in rows:
                 values = [row[col] for col in columns]
