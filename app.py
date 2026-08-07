@@ -577,6 +577,60 @@ from email.mime.multipart import MIMEMultipart
 
 # Email helper
 def send_mail(to: str, subject: str, html_text: str) -> bool:
+    # HTTP API Fallbacks (to bypass Render's SMTP Port Block)
+    brevo_key = os.getenv("BREVO_API_KEY")
+    resend_key = os.getenv("RESEND_API_KEY")
+    
+    if brevo_key:
+        try:
+            print("Sending Email via Brevo HTTP API...")
+            sender_email = os.getenv("MAIL_DEFAULT_SENDER") or "morsevision.cbe@gmail.com"
+            url = "https://api.brevo.com/v3/smtp/email"
+            headers = {
+                "accept": "application/json",
+                "api-key": brevo_key,
+                "content-type": "application/json"
+            }
+            payload = {
+                "sender": {"name": "MorseVision", "email": sender_email},
+                "to": [{"email": to}],
+                "subject": subject,
+                "htmlContent": html_text
+            }
+            req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
+            with urllib.request.urlopen(req) as response:
+                response.read()
+            print("Email Sent Successfully via Brevo")
+            return True
+        except Exception as e:
+            print(f"Brevo HTTP API Error: {e}")
+            return False
+            
+    if resend_key:
+        try:
+            print("Sending Email via Resend HTTP API...")
+            sender_email = os.getenv("MAIL_DEFAULT_SENDER") or "onboarding@resend.dev"
+            url = "https://api.resend.com/emails"
+            headers = {
+                "Authorization": f"Bearer {resend_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "from": f"MorseVision <{sender_email}>",
+                "to": [to],
+                "subject": subject,
+                "html": html_text
+            }
+            req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
+            with urllib.request.urlopen(req) as response:
+                response.read()
+            print("Email Sent Successfully via Resend")
+            return True
+        except Exception as e:
+            print(f"Resend HTTP API Error: {e}")
+            return False
+
+    # Standard SMTP Fallback
     mail_server = os.getenv("MAIL_SERVER") or "smtp.gmail.com"
     mail_port = int(os.getenv("MAIL_PORT") or "587")
     mail_username = os.getenv("MAIL_USERNAME")
@@ -589,7 +643,7 @@ def send_mail(to: str, subject: str, html_text: str) -> bool:
         return True
 
     try:
-        print("Sending Email...")
+        print("Sending Email via SMTP...")
         msg = MIMEMultipart()
         msg["From"] = f"MorseVision <{mail_sender}>"
         msg["To"] = to
