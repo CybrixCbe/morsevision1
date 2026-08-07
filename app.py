@@ -237,6 +237,7 @@ def init_db():
         id VARCHAR(255) PRIMARY KEY,
         name TEXT,
         email VARCHAR(255) UNIQUE,
+        username VARCHAR(255),
         password_hash TEXT,
         is_verified INTEGER DEFAULT 0,
         created_at TEXT,
@@ -258,6 +259,15 @@ def init_db():
         profile_completed INTEGER DEFAULT 0
     )
     """)
+    
+    # Ensure username column exists in USERS table (MySQL/MariaDB migration fix)
+    try:
+        cursor.execute("SHOW COLUMNS FROM USERS LIKE 'username'")
+        if not cursor.fetchone():
+            cursor.execute("ALTER TABLE USERS ADD COLUMN username VARCHAR(255)")
+            print("Successfully added username column to USERS table.")
+    except Exception as e:
+        print(f"Failed to check/add username column: {e}")
     
     # 2. OTP Table
     run_sql("""
@@ -650,6 +660,8 @@ class LoginSchema(BaseModel):
     password: str
 
 class CompleteProfileSchema(BaseModel):
+    name: Optional[str] = None
+    username: Optional[str] = None
     organization: Optional[str] = None
     department: Optional[str] = None
     purpose: Optional[Union[List[str], str]] = None
@@ -1382,8 +1394,8 @@ def complete_profile(data: CompleteProfileSchema, user: dict = Depends(get_curre
     purpose_val = ", ".join(data.purpose) if isinstance(data.purpose, list) else data.purpose
     prefs_str = str(data.notification_prefs) if data.notification_prefs else "{}"
     db_run(
-        "UPDATE USERS SET organization = ?, department = ?, purpose = ?, experience_level = ?, country = ?, timezone = ?, preferred_theme = ?, notification_prefs = ?, profile_completed = 1 WHERE id = ?",
-        [data.organization, data.department, purpose_val, data.experience_level, data.country, data.timezone, data.preferred_theme, prefs_str, user.get("id")]
+        "UPDATE USERS SET name = ?, username = ?, organization = ?, department = ?, purpose = ?, experience_level = ?, country = ?, timezone = ?, preferred_theme = ?, notification_prefs = ?, profile_completed = 1 WHERE id = ?",
+        [data.name, data.username, data.organization, data.department, purpose_val, data.experience_level, data.country, data.timezone, data.preferred_theme, prefs_str, user.get("id")]
     )
     updated_user = db_get("SELECT * FROM USERS WHERE id = ?", [user.get("id")])
     log_event("INFO", f"Onboarding profile setup completed for {user.get('email')}")
